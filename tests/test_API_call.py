@@ -15,6 +15,7 @@ from API_call import (
     calls_made_today,
     collect,
     fetch_daily_prices,
+    main,
     record_call,
     upsert_daily_prices,
     validate_response,
@@ -115,7 +116,7 @@ def test_calls_made_today_returns_count_from_query():
     assert calls_made_today(mock_cursor) == 3
 
 
-def test_collect_skips_when_daily_limit_reached():
+def test_collect_returns_false_and_writes_nothing_when_daily_limit_reached():
     with patch("API_call.get_connection") as mock_get_connection:
         mock_cur = (
             mock_get_connection.return_value
@@ -126,12 +127,13 @@ def test_collect_skips_when_daily_limit_reached():
 
         mock_cur.fetchone.return_value = (25,)
 
-        collect("IBM", {"API_KEY": "dummy"})
+        result = collect("IBM", {"API_KEY": "dummy"})
 
+        assert result is False
         mock_cur.executemany.assert_not_called()
 
 
-def test_collect_proceeds_and_writes_data_when_under_daily_limit():
+def test_collect_returns_true_and_writes_data_when_under_daily_limit():
     with patch("API_call.get_connection") as mock_get_connection:
         mock_cur = (
             mock_get_connection.return_value
@@ -142,8 +144,9 @@ def test_collect_proceeds_and_writes_data_when_under_daily_limit():
 
         mock_cur.fetchone.return_value = (0,)
 
-        collect("IBM", {"API_KEY": "dummy"}, fixture_path=FIXTURES_DIR / "daily_series_success.json")
+        result = collect("IBM", {"API_KEY": "dummy"}, fixture_path=FIXTURES_DIR / "daily_series_success.json")
 
+        assert result is True
         mock_cur.executemany.assert_called_once()
 
 
@@ -188,7 +191,7 @@ def test_collect_uploads_raw_data_to_s3_in_live_mode():
     )
 
 
-def test_collect_skips_s3_upload_when_api_response_is_invalid():
+def test_collect_returns_false_and_skips_s3_upload_when_api_response_is_invalid():
     error_response = load_fixture("invalid_api_key.json")
     config = {"API_KEY": "dummy", "S3_BUCKET_NAME": "test-bucket"}
 
@@ -203,9 +206,29 @@ def test_collect_skips_s3_upload_when_api_response_is_invalid():
         )
         mock_cur.fetchone.return_value = (0,)
 
-        collect("IBM", config)
+        result = collect("IBM", config)
 
+    assert result is False
     mock_upload.assert_not_called()
+
+
+# A scheduler only sees the exit code, so an empty run must not exit with 0.
+@pytest.mark.parametrize(
+    "collected, expected_exit_code",
+    [(True, 0), (False, 1)],
+    ids=["data_collected", "nothing_collected"],
+)
+def test_main_exit_code_reflects_collect_result(collected, expected_exit_code):
+    with patch("API_call.parse_args") as mock_parse_args, \
+            patch("API_call.get_config", return_value={}), \
+            patch("API_call.collect", return_value=collected):
+        mock_parse_args.return_value.ticker = "IBM"
+        mock_parse_args.return_value.fixture = None
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code == expected_exit_code
 
 
 def test_fetch_daily_prices_returns_parsed_json_on_success():

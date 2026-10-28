@@ -14,6 +14,7 @@ Usage:
 import argparse
 import os
 import ssl
+import sys
 import json
 import logging
 import time
@@ -174,14 +175,19 @@ def upsert_daily_prices(cur: psycopg.Cursor, ticker: str, price_data: dict) -> i
     return len(rows)
 
 
-def collect(ticker: str, config: dict[str, str], fixture_path: Path | None = None) -> None:
+def collect(ticker: str, config: dict[str, str], fixture_path: Path | None = None) -> bool:
     """One parameterized entry point (design doc 4.5), so a future scheduler
     (cron / Airflow, project 6) can call this unchanged.
 
     Order matters: the Postgres upsert is committed first, then the raw
     response is uploaded to S3 on a best-effort basis (a failed upload is
     logged, not raised). In fixture mode the S3 upload is skipped, because a
-    saved fixture is not what the live API returned on that day."""
+    saved fixture is not what the live API returned on that day.
+
+    Returns True if fresh price data was written to Postgres. Returns False if
+    the run collected nothing: the daily call limit was reached, or the API
+    returned no price data. A scheduler uses this through the exit code of
+    main(). The S3 upload does not change the result; verify_s3.py checks it."""
     today = dt.datetime.now(dt.timezone.utc).date()
 
     with get_connection(config) as conn:
@@ -192,7 +198,7 @@ def collect(ticker: str, config: dict[str, str], fixture_path: Path | None = Non
                     "Daily call limit (%d) already reached; skipping %s.",
                     DAILY_CALL_LIMIT, ticker,
                 )
-                return
+                return False
 
             if fixture_path is not None:
                 logger.info("Using fixture %s instead of a live API call.", fixture_path)
@@ -210,7 +216,7 @@ def collect(ticker: str, config: dict[str, str], fixture_path: Path | None = Non
                     ticker, validation.error,
                 )
                 conn.commit()
-                return
+                return False
 
             rows_written = upsert_daily_prices(cur, ticker, validation.result)
             conn.commit()
@@ -225,6 +231,8 @@ def collect(ticker: str, config: dict[str, str], fixture_path: Path | None = Non
                 )
             else:
                 logger.info("S3 upload skipped for %s: fixture mode (--fixture).", ticker)
+
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,14 +249,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Command-line entry point."""
+    """Command-line entry point. Exit code 0 if fresh data was collected, 1 otherwise."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = parse_args()
     config = get_config()
-    collect(args.ticker, config, fixture_path=args.fixture)
+    collected = collect(args.ticker, config, fixture_path=args.fixture)
+    sys.exit(0 if collected else 1)
 
 
 if __name__ == "__main__":
