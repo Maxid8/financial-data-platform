@@ -45,6 +45,20 @@ Conclusion: the forum claim that Free Edition cannot read S3 is about key-based 
 - `scripts/run_daily_collection.ps1` runs collector + verifier for each ticker; `logs/` added to `.gitignore`.
 - Success needs both exit codes to be 0. The verifier alone cannot tell a fresh object from one uploaded earlier the same day.
 
+### Collection wrapper: catch-up runs and IP logging (2026-10-29)
+
+- **Finding:** our `api_calls` table shows 10 calls on 2026-10-28 (5 successful) and 5 on 2026-10-29 (0 successful). Alpha Vantage refused calls with its "25 requests per day" message far below 25 calls from us. The same task succeeded at 15:41 the same day, and a browser call from the company network worked. The scheduler and the code are not the cause; the rejection is intermittent and decided by Alpha Vantage.
+- **Hypothesis (unconfirmed):** Alpha Vantage also limits per public IP, and the company network shares its IP(s). Users of shared hosting report the same pattern; their provider attributed it to IP-based limits. Alpha Vantage does not document this.
+- **Change:** the wrapper first checks with the verifier whether today's object exists and skips the ticker without an API call if it does. Repeated runs on the same day only retry missing tickers. Additional triggers at 11:00 and 13:30, before the New York open, so catch-up runs still return closed days.
+- **Diagnostics:** each run logs its public IP (checkip.amazonaws.com, same route as the collector), so rejections can be matched to IP addresses.
+
+### Root cause of the Alpha Vantage rejections (2026-10-30)
+
+- **Evidence:** all scheduled runs on 2026-10-30 (9:00, 11:00) were rejected. The IP lookup in the wrapper returned the laptop's internal address (172.16.x.x), and `httpbin.org/ip` showed two addresses: the internal one and the company's public IP. The company proxy therefore forwards the internal client IP (`X-Forwarded-For`). In the same minute, an Alpha Vantage call from the laptop browser was rejected and the same call from a phone on mobile data returned data.
+- **Conclusion:** the rejections are bound to the company network, not to the API key or our code. Most likely mechanism (not confirmed by Alpha Vantage): the provider counts requests per forwarded client IP, and a private address such as 172.16.x.x is shared by many networks worldwide; or it counts per public IP shared within the company. Either way the fix is outside the code.
+- **Options:** (1) the proxy stops forwarding internal IPs to external sites (also a privacy best practice); (2) run the collection from another network; (3) another data source.
+- **Impact on project 4:** none for development. The raw layer already has two complete snapshots for all five tickers (2026-10-28 partial day, 2026-10-29) plus earlier IBM snapshots, enough for parsing, deduplication and the partial-day test.
+
 ## Observations to follow up
 
 - **API key in the log file.** The Alpha Vantage error message contains the API key and is logged. `logs/` is git-ignored. Consider masking it in the collector.
