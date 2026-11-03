@@ -21,6 +21,20 @@ changes to earlier projects go into their own design docs.
 | D11 | Input data | 5 tickers (IBM, MSFT, AAPL, JPM, XOM), weekdays 9:00 from the Windows Task Scheduler through `scripts/run_daily_collection.ps1` (collector + verifier per ticker, log file in `logs/`, exit code 0/1). |
 | D12 | Repository | Same repository and local folder; project 4 is closed with a `v0.4-...` tag. GitHub repository renamed to `financial-data-platform` (the repository grows into the financial data platform of project 9; GitHub redirects the old URL). README title, intro and clone URL are updated when project 4 is closed. |
 
+## Detailed design of the job functions (2026-10-30)
+
+| Function | Input | Output | Notes |
+|---|---|---|---|
+| `read_raw(spark, path)` | Spark session, `raw/` root | DataFrame, one row per file | explicit schema: `Meta Data.2. Symbol` and the `Time Series (Daily)` map (date string -> struct of five strings); other fields are not read. `year`, `month`, `day` come from partition discovery. |
+| `parse_snapshots(df)` | output of `read_raw` | DataFrame, one row per ticker, trading day and snapshot | explode the map; `ticker` from `Meta Data` (not the file name); `trade_date` from the map key (string to date); prices to DECIMAL(12,4), volume to BIGINT; `snapshot_date` from `year`/`month`/`day`; select the D1 columns. Keeps duplicates. |
+| `deduplicate(df)` | output of `parse_snapshots` | DataFrame, one row per ticker and trading day | `ROW_NUMBER` over `(ticker, trade_date)` ordered by `snapshot_date` desc (D3). |
+| rule helpers | DataFrame | DataFrame of violating rows (empty = passed) | one helper per D6 rule; the uniqueness rule returns the duplicated keys. |
+| `validate(df)` | output of `deduplicate` | nothing, or raises | empty input checked first; the NULL rule next and fails immediately (NULLs make comparisons unknown, so later rules would miss rows); all other rules run and their failures are collected into one exception: rule name, row count, examples (ticker, trade_date). |
+| `write_processed(df, path)` | DataFrame, `processed/daily_prices/` | nothing | `coalesce(1)`, overwrite, Parquet. |
+
+- `Meta Data.5. Time Zone` is `US/Eastern`: `trade_date` is the New York exchange date. Documented, not stored as a column.
+- The explicit schema also acts as a filter: unlisted fields are ignored; listed but missing fields become NULL and are caught by `validate`.
+
 ## Databricks spike (2026-10-28)
 
 | Test | Result |
@@ -57,7 +71,7 @@ Conclusion: the forum claim that Free Edition cannot read S3 is about key-based 
 - **Evidence:** all scheduled runs on 2026-10-30 (9:00, 11:00) were rejected. The IP lookup in the wrapper returned the laptop's internal address (172.16.x.x), and `httpbin.org/ip` showed two addresses: the internal one and the company's public IP. The company proxy therefore forwards the internal client IP (`X-Forwarded-For`). In the same minute, an Alpha Vantage call from the laptop browser was rejected and the same call from a phone on mobile data returned data.
 - **Conclusion:** the rejections are bound to the company network, not to the API key or our code. Most likely mechanism (not confirmed by Alpha Vantage): the provider counts requests per forwarded client IP, and a private address such as 172.16.x.x is shared by many networks worldwide; or it counts per public IP shared within the company. Either way the fix is outside the code.
 - **Options:** (1) the proxy stops forwarding internal IPs to external sites (also a privacy best practice); (2) run the collection from another network; (3) another data source.
-- **Impact on project 4:** none for development. The raw layer already has two complete snapshots for all five tickers (2026-10-28 partial day, 2026-10-29) plus earlier IBM snapshots, enough for parsing, deduplication and the partial-day test.
+- **Impact on project 4:** none for development. The raw layer already has two complete snapshots for all five tickers (2026-10-28, 2026-10-29) plus earlier IBM snapshots, enough for parsing, deduplication and the partial-day test.
 
 ## Observations to follow up
 
@@ -66,3 +80,4 @@ Conclusion: the forum claim that Free Edition cannot read S3 is about key-based 
 - **Partial day captured.** The run on 2026-10-28 at 15:12 (Budapest) was during US trading hours, so that snapshot holds a partial 2026-10-28 bar. The next morning run has the final values: a real test case for D3.
 - **Scheduler did not start on 2026-10-29.** The condition "start only if the computer is on AC power" was still enabled and the laptop ran on battery at 9:00. The "run as soon as possible after a missed start" setting does not help here, because the start was not missed but blocked by a condition. Fix: condition disabled.
 - **Alpha Vantage refused the first call of 2026-10-29** (manual run at 12:11) with the daily-limit message, although only about 10 calls were made the day before. The fixed exit code worked: all five tickers were reported as FAILED. Hypothesis, not confirmed: the limit is also counted per public IP, and the company network shares one IP. Test: one collector run from another network.
+- **Correction (2026-10-30): no partial day.** The fixture check showed that the 2026-10-28 snapshot (collected 15:12 Budapest, during US trading hours) ends with 2026-10-27, and the 2026-10-29 snapshot ends with 2026-10-28. The free `TIME_SERIES_DAILY` response contains completed trading days only. The two snapshots overlap on 99 days with identical values. The "latest snapshot wins" rule (D3) stays: it handles provider corrections and is deterministic. The "partial day captured" note above was wrong.

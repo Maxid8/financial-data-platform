@@ -98,7 +98,7 @@ One script file. The transformation is split into pure functions that only take 
 
 **Explicit schema, no inference.** `Time Series (Daily)` is read as a map: key = date string, value = struct of five strings. Inference would create one field per date; the Databricks spike confirmed this (section 9). Prices are cast from string directly to DECIMAL, with no float step.
 
-**Deduplication.** `ROW_NUMBER() OVER (PARTITION BY ticker, trade_date ORDER BY snapshot_date DESC) = 1`. The latest snapshot wins because a run during US trading hours stores a partial day, and a later snapshot has the final values. Ties are impossible: the raw key allows one file per ticker per day. `dropDuplicates` is not used, because it keeps an arbitrary row.
+**Deduplication.** `ROW_NUMBER() OVER (PARTITION BY ticker, trade_date ORDER BY snapshot_date DESC) = 1`. The latest snapshot wins, so a correction published by the provider replaces the older value. The free `TIME_SERIES_DAILY` response ends with the previous trading day, so partial days were not observed (fixture check, 2026-10-30); overlapping days in consecutive snapshots were identical. Ties are impossible: the raw key allows one file per ticker per day. `dropDuplicates` is not used, because it keeps an arbitrary row.
 
 **DataFrame API only.** No RDDs and no `sparkContext`: serverless Databricks runs on Spark Connect, where these are not available.
 
@@ -246,7 +246,7 @@ Fallback if the external location cannot be validated in Free Edition: raw files
 | `snapshot_date` column | `last_updated`, `processed_at` | precise meaning, lineage through the raw key; `processed_at` would be constant |
 | Explicit map schema in the job | Glue Crawler | the crawler would create one column per date, and its result is not guaranteed to be stable |
 | DDL for the processed table | crawler, catalog update from the job | the schema stays exactly as designed, versioned in git |
-| Latest snapshot wins, `ROW_NUMBER` | earliest wins; `dropDuplicates` | partial days are replaced by final values; deterministic |
+| Latest snapshot wins, `ROW_NUMBER` | earliest wins; `dropDuplicates` | provider corrections replace older values; deterministic |
 | Full rebuild, plain overwrite | incremental with bookmarks; write-then-swap | a few MB of data; simple and self-healing. Accepted risk: the overwrite is not atomic. Mitigated by validating before the write |
 | No partitioning, one file | `ticker`, `year`, both | far below the recommended file size; no partition registration |
 | Strict data quality | quarantine, mixed | small, financial data; a failed run leaves the old table intact |
@@ -277,11 +277,11 @@ Fallback if the external location cannot be validated in Free Edition: raw files
 
 ## 8. Testing
 
-- **Unit tests (local):** parsing (types, explode, `snapshot_date`), deduplication (latest wins, partial day replaced), every data quality rule with a passing and a failing case.
+- **Unit tests (local):** parsing (types, explode, `snapshot_date`), deduplication (latest wins, overlapping snapshots collapse to one row, a changed value in a later snapshot wins), every data quality rule with a passing and a failing case.
 - **Integration (Glue):** first run checks the IAM policy, ANSI behaviour, the output file count and the log summary.
 - **End to end:** Athena row counts per ticker match the expected trading days; a value from `processed` equals the same value in PostgreSQL.
 - **Measurement:** stored bytes of `raw/` vs `processed/`, and Athena "data scanned" per query. Open: whether a temporary Athena table over the raw JSON is created for a like-for-like query comparison.
-- **Real partial-day case:** the 2026-10-28 snapshot was taken during US trading hours; the following snapshot must replace that day's values.
+- **Real overlapping snapshots:** the fixtures `tests/fixtures/raw/.../day=28` and `day=29` (IBM) overlap on 99 trading days; after deduplication 101 distinct days remain.
 
 ## 9. Databricks Spike (2026-10-28)
 
