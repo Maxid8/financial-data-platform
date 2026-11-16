@@ -280,8 +280,25 @@ Fallback if the external location cannot be validated in Free Edition: raw files
 - **Unit tests (local):** parsing (types, explode, `snapshot_date`), deduplication (latest wins, overlapping snapshots collapse to one row, a changed value in a later snapshot wins), every data quality rule with a passing and a failing case.
 - **Integration (Glue):** first run checks the IAM policy, ANSI behaviour, the output file count and the log summary.
 - **End to end:** Athena row counts per ticker match the expected trading days; a value from `processed` equals the same value in PostgreSQL.
-- **Measurement:** stored bytes of `raw/` vs `processed/`, and Athena "data scanned" per query. Open: whether a temporary Athena table over the raw JSON is created for a like-for-like query comparison.
+- **Measurement:** stored bytes of `raw/` vs `processed/`, and Athena "data scanned" per query, on a temporary Athena table over the raw JSON (results in 8.1).
 - **Real overlapping snapshots:** the fixtures `tests/fixtures/raw/.../day=28` and `day=29` (IBM) overlap on 99 trading days; after deduplication 101 distinct days remain.
+
+### 8.1 Measured: raw JSON vs processed Parquet (2026-11-16)
+
+Same question on both layers in Athena: trading days and average close per ticker. Queries in `sql/measure_json_vs_parquet.sql`; the temporary raw table was dropped afterwards.
+
+| | Raw JSON | Processed Parquet | Ratio |
+|---|---|---|---|
+| Stored size | 935.4 KB (71 files) | 17.9 KB (1 file) | about 52x |
+| Data scanned per query | 935.44 KB | 2.98 KB | about 314x |
+| Rows read | 71 snapshots, 7,100 day-rows after explode | 577 | about 12x |
+| Run time (Athena "Run time") | 717 ms (deduplicated) / 1,075 ms (naive) | 474 ms | about 1.5-2x |
+| Query | explode + window function + filter | one `GROUP BY` | |
+
+- **Correctness:** the deduplicated raw query returned exactly the Parquet result for all five tickers (113 trading days each, IBM 125; identical averages). This is an independent check of the Glue job: the same logic in another engine and language gives the same numbers.
+- **The trap:** without deduplication the raw query counts every day once per snapshot (1,400 and 1,500 instead of 113 and 125) and returns different averages, without any error.
+- **Cost at this size:** both queries are billed at Athena's 10 MB minimum, so they cost the same today. Scanned bytes grow linearly with the data, so the 314x difference becomes a cost difference as the raw layer grows: the duplication factor equals the number of daily snapshots and increases by one every collection day.
+- **Run time:** at kilobyte scale the fixed overhead (queueing, planning) dominates; the measured difference understates the effect at larger volumes.
 
 ## 9. Databricks Spike (2026-10-28)
 

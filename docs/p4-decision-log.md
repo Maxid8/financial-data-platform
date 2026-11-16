@@ -45,6 +45,7 @@ changes to earlier projects go into their own design docs.
 - Check query (row count and date range per ticker): input rows 577, the same as the Glue log; input bytes 6.66 KB for 577 rows, because Parquet only reads the columns the query uses (`ticker`, `trade_date`). Runtime 689 ms. Billed at the 10 MB minimum per query.
 - Business questions in `sql/athena_queries.sql` (Q1-Q6: latest daily return, 20-day moving average, annualised volatility, maximum drawdown, monthly return, unusual volume). Checked for logic on synthetic data in DuckDB; named WINDOW clauses avoided for Athena compatibility.
 
+- Measurement raw JSON vs Parquet done with a temporary Athena table over `raw/` (OpenX JSON SerDe, maps for the keys with spaces and dots, `MSCK REPAIR TABLE` for the partitions); results in the design doc, section 8.1. The deduplicated raw query matched the Parquet result exactly.
 ## Detailed design of the job functions (2026-10-30)
 
 | Function | Input | Output | Notes |
