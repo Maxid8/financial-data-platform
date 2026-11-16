@@ -29,6 +29,22 @@ changes to earlier projects go into their own design docs.
 - Git: write operations (add, commit, push) stay on Windows; WSL git is used read-only (`safe.directory` for this path; `core.filemode` is already false in the repository).
 - Tests: `pytest tests/test_raw_to_processed.py` in WSL (20 tests). The module skips itself in the collector environment (`importorskip`).
 
+### First Glue run (2026-11-16)
+
+- Job `daily-prices-raw-to-processed` created in the console with the D9 settings. Glue 6.0 is available in `eu-north-1`.
+- **Flex execution is not offered** by the console for Glue 6.0, so the job runs with the Standard execution class (D9 deviation; cost difference is cents per run).
+- **IAM role:** in the new AWS experience the console attaches automatically generated permissions by default ("Your Glue ETL job will automatically be given permission to access other services"). The "Customize" link allows selecting our own role; `DailyPricesGlueJobRole` is used, so the least-privilege policy of D7 applies. This closes the open question of D7: a custom role can be created and used.
+- Settings kept from the console defaults: continuous logging, job metrics, observability metrics, job insights. Spark UI and "Glue Data Catalog as Hive metastore" are off.
+- First run started; a second start was refused with `ConcurrentRunsExceededException` while it was still running: max concurrency 1 works as designed. Result of the first run: Succeeded in 2 min 15 s (Standard, G.1X x 2).
+- First run output: 71 raw files read, 577 rows written, 5 tickers, trading days 2026-05-19 to 2026-11-13; one Snappy-compressed Parquet file in `processed/daily_prices/` (no `_SUCCESS` marker is written in Glue). 0.075 DPU-hours, roughly 2-3 US cents at the Glue 6.0 rate (eu-north-1 rate to be confirmed on the pricing page).
+- The log contains a `SyntaxWarning: invalid escape sequence` from `/tmp/glue-job-.../pythonrunner/runscript.py`. This is Glue's own runner script under Python 3.13, not our code; it does not affect the job.
+
+### Athena (2026-11-16)
+
+- `financial_data` database and `daily_prices` external table created with `sql/athena_ddl.sql` in the `daily-prices` workgroup (managed results, 100 MB per-query limit).
+- Check query (row count and date range per ticker): input rows 577, the same as the Glue log; input bytes 6.66 KB for 577 rows, because Parquet only reads the columns the query uses (`ticker`, `trade_date`). Runtime 689 ms. Billed at the 10 MB minimum per query.
+- Business questions in `sql/athena_queries.sql` (Q1-Q6: latest daily return, 20-day moving average, annualised volatility, maximum drawdown, monthly return, unusual volume). Checked for logic on synthetic data in DuckDB; named WINDOW clauses avoided for Athena compatibility.
+
 ## Detailed design of the job functions (2026-10-30)
 
 | Function | Input | Output | Notes |
