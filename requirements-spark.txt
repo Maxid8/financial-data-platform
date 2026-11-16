@@ -1,10 +1,12 @@
-# Local development environment for the project 4 Spark job (.venv-spark).
-# Matches the AWS Glue 6.0 runtime: Python 3.13, Spark 4.1.1, Java 17 (JDK installed separately).
+# Local development environment for the project 4 Spark job.
+# Matches the AWS Glue 6.0 runtime: Python 3.13, Spark 4.1.1, Java 17.
 # Not used by Glue itself: the Glue runtime ships its own PySpark.
 #
-#   py -V:3.13 -m venv .venv-spark
-#   .venv-spark\Scripts\Activate.ps1
+# Runs in WSL2 (Ubuntu 24.04), not on native Windows (see docs/p4-decision-log.md, D8):
+#   sudo apt install -y openjdk-17-jdk-headless python3.13 python3.13-venv   # python3.13: deadsnakes PPA
+#   python3.13 -m venv ~/.venvs/spark && source ~/.venvs/spark/bin/activate
 #   pip install -r requirements-spark.txt
+#   pytest tests/test_raw_to_processed.py
 colorama==0.4.6
 iniconfig==2.3.1
 packaging==26.3

@@ -21,6 +21,14 @@ changes to earlier projects go into their own design docs.
 | D11 | Input data | 5 tickers (IBM, MSFT, AAPL, JPM, XOM), weekdays 9:00 from the Windows Task Scheduler through `scripts/run_daily_collection.ps1` (collector + verifier per ticker, log file in `logs/`, exit code 0/1). |
 | D12 | Repository | Same repository and local folder; project 4 is closed with a `v0.4-...` tag. GitHub repository renamed to `financial-data-platform` (the repository grows into the financial data platform of project 9; GitHub redirects the old URL). README title, intro and clone URL are updated when project 4 is closed. |
 
+### D8 update: local Spark runs in WSL2 (2026-11-03)
+
+- Native Windows failed twice: PySpark's `.cmd` launchers split the project path at its spaces, and with the virtual environment moved to a path without spaces the Python workers still crashed (`OSError: [WinError 10038]`, `Python worker exited unexpectedly`) with Python 3.13 and PySpark 4.1.1.
+- Options considered: Glue 5.1 with Python 3.11 + PySpark 3.5.6 on Windows; WSL2; developing in Glue. Chosen: **WSL2** (Ubuntu 24.04, OpenJDK 17, Python 3.13 from the deadsnakes PPA, virtual environment in `~/.venvs/spark`), so the local versions keep matching Glue 6.0.
+- The company proxy inspects TLS for some hosts only (pypi.org was not inspected, launchpad.net was): the two company CA certificates were added to the Ubuntu store (`update-ca-certificates`), and pip uses the system bundle (`pip config set global.cert /etc/ssl/certs/ca-certificates.crt`).
+- Git: write operations (add, commit, push) stay on Windows; WSL git is used read-only (`safe.directory` for this path; `core.filemode` is already false in the repository).
+- Tests: `pytest tests/test_raw_to_processed.py` in WSL (20 tests). The module skips itself in the collector environment (`importorskip`).
+
 ## Detailed design of the job functions (2026-10-30)
 
 | Function | Input | Output | Notes |

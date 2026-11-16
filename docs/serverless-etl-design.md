@@ -223,7 +223,7 @@ Created in the console; these settings are the source of truth until project 8 m
 
 ### 4.9 Development and deployment
 
-- **Local tests.** `parse_snapshots`, `deduplicate` and `validate` are tested with pytest on in-memory DataFrames built from the project 2 fixture. Tests do not write files, so Spark on Windows needs no extra Hadoop binaries. Local environment: Python 3.13 in a separate virtual environment, PySpark 4.1.x, JDK 17.
+- **Local tests.** `parse_snapshots`, `deduplicate` and `validate` are tested with pytest on in-memory DataFrames built from the project 2 fixture. Tests do not write files, so Spark on Windows needs no extra Hadoop binaries. Local environment: WSL2 (Ubuntu 24.04), Python 3.13, PySpark 4.1.1, JDK 17; native Windows could not run the Python workers (decision log, D8 update).
 - **Upload and run.** `aws s3 cp` uploads the script, `aws glue start-job-run` starts the job. The commands are in the README; project 6 calls the same API.
 - **Integration.** I/O and Glue-specific code are tested by real Glue runs.
 
