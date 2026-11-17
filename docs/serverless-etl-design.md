@@ -1,10 +1,10 @@
 # Project 4 — Serverless ETL with AWS Glue and Athena
 ## Design Doc
 
-**Status:** design approved, implementation not started
+**Status:** implemented, to be tagged as `v0.4-serverless-etl`; the Databricks stage is deferred to project 9 (section 4.10)
 **Builds on:** project 3, the S3 raw layer ([`data-lake-design.md`](data-lake-design.md))
 **Working notes:** [`p4-decision-log.md`](p4-decision-log.md)
-**Last updated:** 2026-10-29
+**Last updated:** 2026-11-16
 
 ---
 
@@ -20,7 +20,7 @@ This project builds the `processed/` layer: one typed, de-duplicated row per tic
 
 - **Turn the raw layer into an analytical table** with a serverless Spark job (AWS Glue).
 - **Query it in place** with Athena, and measure what Parquet saves compared with JSON.
-- **Keep the logic portable.** The same transformation code runs locally in tests, in Glue, and in a Databricks stage at the end of the project.
+- **Keep the logic portable.** The same transformation code runs locally in tests and in Glue, using only the DataFrame API. A Databricks stage was planned and deferred (section 4.10).
 
 ## 2. Scope
 
@@ -29,13 +29,13 @@ This project builds the `processed/` layer: one typed, de-duplicated row per tic
 - Data quality checks inside the job, before the write
 - An Athena table (DDL), a workgroup with a scan limit, and business queries
 - Local unit tests for the transformation logic
-- A Databricks stage: the same functions reading the raw layer through Unity Catalog, writing a Delta table
 
 **Out of scope (later projects):**
 - Scheduling the job — project 6 (Airflow)
 - A dimensional model and BI — project 5 (Redshift, Power BI)
 - Infrastructure as code — project 8 (Terraform); resources here are created in the console
 - Incremental processing and table formats in the Glue path — revisited when the volume requires it (section 5)
+- The Databricks stage — deferred to project 9 (section 4.10)
 
 ## 3. Architecture
 
@@ -45,7 +45,7 @@ Windows Task Scheduler (weekdays 9:00)
        -> S3 raw/year=YYYY/month=MM/day=DD/TICKER.json
                     |
                     v
-          Glue job (Spark 4.1, Glue 6.0, Flex)
+          Glue job (Spark 4.1, Glue 6.0)
             read -> parse -> deduplicate -> validate -> write
                     |
                     v
@@ -53,9 +53,6 @@ Windows Task Scheduler (weekdays 9:00)
                     |
                     v
           Glue Data Catalog table (created by DDL) -> Athena (workgroup, managed results)
-
-Stage 2: Databricks Free Edition
-  Unity Catalog external location (read-only, raw/) -> same functions -> Delta table
 ```
 
 ## 4. Components in Detail
@@ -207,7 +204,7 @@ Created in the console; these settings are the source of truth until project 8 m
 |---|---|---|
 | Glue version | 6.0 (Spark 4.1, Python 3.13) | newest runtime, about 30% cheaper per DPU-hour than 5.1, no migration burden for a new job |
 | Worker type and count | G.1X x 2 | the smallest configuration is more than enough |
-| Execution class | Flex | cheaper; a delayed start is acceptable |
+| Execution class | Standard | Flex was planned (cheaper, delayed start acceptable), but the console does not offer it for Glue 6.0 |
 | Timeout | 10 minutes | the default for Glue 5.0+ is 480 minutes; a stuck job would bill for hours |
 | Max concurrency | 1 | two parallel full overwrites would corrupt each other |
 | Retries | 0 | a failure is investigated, not repeated blindly |
@@ -223,19 +220,17 @@ Created in the console; these settings are the source of truth until project 8 m
 
 ### 4.9 Development and deployment
 
-- **Local tests.** `parse_snapshots`, `deduplicate` and `validate` are tested with pytest on in-memory DataFrames built from the project 2 fixture. Tests do not write files, so Spark on Windows needs no extra Hadoop binaries. Local environment: WSL2 (Ubuntu 24.04), Python 3.13, PySpark 4.1.1, JDK 17; native Windows could not run the Python workers (decision log, D8 update).
-- **Upload and run.** `aws s3 cp` uploads the script, `aws glue start-job-run` starts the job. The commands are in the README; project 6 calls the same API.
+- **Local tests.** `parse_snapshots`, `deduplicate` and `validate` are tested with pytest on in-memory DataFrames built from the project 2 fixture. `read_raw` reads the raw fixtures in `tests/fixtures/raw/`; `write_processed` writes to a temporary folder. Local environment: WSL2 (Ubuntu 24.04), Python 3.13, PySpark 4.1.1, JDK 17; native Windows could not run the Python workers (decision log, D8 update).
+- **Upload and run.** The first upload and run went through the console. For later changes `aws s3 cp` uploads the script and `aws glue start-job-run` starts the job (commands in the README); project 6 calls the same API.
 - **Integration.** I/O and Glue-specific code are tested by real Glue runs.
 
-### 4.10 Databricks stage
+### 4.10 Databricks stage (deferred to project 9)
 
-After the Glue path works:
+Planned: a Unity Catalog storage credential and external location (manual setup, read-only role on `raw/`), a notebook running the same functions, and a Delta table, compared with Glue in the README.
 
-1. IAM role for Databricks (manual setup, read-only, `raw/` prefix), storage credential and external location in Unity Catalog.
-2. A notebook imports the same pure functions, reads the raw layer through the external location and writes a Delta table.
-3. The README compares Glue and Databricks: setup, cost, development loop, table format.
+Result (2026-11-16): the storage credential could be created, but its validation failed at the first step, "Assume Role" (`PERMISSION_DENIED: Failed to get credentials`); "Self Assume Role" and "External ID Condition" were skipped. The role, trust policy (Databricks Unity Catalog master role plus self-assume, real external ID) and credential ARN were checked and correct. Other users report the same failure with Free Edition on AWS accounts of the new AWS experience; the likely cause is an AWS-managed account policy that blocks cross-account role assumption, which only becomes editable after activating advanced features (irreversible, removes the spend limit). Not proven.
 
-Fallback if the external location cannot be validated in Free Edition: raw files uploaded to a Volume.
+Decision: deferred to project 9, where Databricks is a core tool. The fallback (a read-only IAM user key in a Databricks secret scope, copying `raw/` to a Volume with boto3) would bring back a long-lived key and workaround code, for little additional learning in this project. The test resources (credential, role, policy) were removed.
 
 ## 5. Key Design Decisions
 
@@ -254,9 +249,9 @@ Fallback if the external location cannot be validated in Free Edition: raw files
 | Athena managed results | results prefix in S3 | no bucket, no cleanup, no extra permissions |
 | Builder ID + `aws login` | IAM user with access keys | temporary credentials; console IAM users are not available in the new AWS experience |
 | Pure functions, local pytest | developing in Glue | fast feedback, no cost per attempt |
-| Glue 6.0, Flex | 5.1, Standard | cheaper, newest runtime; delayed start accepted |
+| Glue 6.0 | 5.1 | about 30% cheaper per DPU-hour, newest runtime; the local environment matches it in WSL2 (Flex planned, not offered for 6.0) |
 | Console job + CLI deploy | console only; IaC now | console for learning, CLI for repeatable runs (same API as Airflow); IaC in project 8 |
-| Databricks as the last stage | skip; do it first | Glue stays the focus; the spike showed a viable path |
+| Databricks deferred to project 9 | key-based fallback via a Volume | Unity Catalog role assumption fails on this AWS account type; the fallback would add a long-lived key (section 4.10) |
 | No Glue Crawler (deviation from the original plan) | crawler on `raw/` | see above; documented as a deliberate deviation |
 
 **When to change course:** move to incremental processing with a table format (Iceberg or Delta, `MERGE`) and to `year` partitions with partition projection when the table reaches several hundred MB, when the run time or cost grows noticeably, or when other readers depend on the table during a run.
@@ -310,32 +305,36 @@ Same question on both layers in Athena: trading days and average close per ticke
 
 The community claim that Free Edition cannot read S3 concerns key-based access on serverless compute, which Spark Connect does not support, not the network.
 
+Follow-up (2026-11-16): the end-to-end Unity Catalog validation failed at "Assume Role"; see section 4.10.
+
 ## 10. Risks and Open Questions
 
-- *Open:* can the Glue IAM role be created in the new AWS experience project account? First implementation step.
-- *Open:* Alpha Vantage rejected the first call of 2026-10-29 with its daily-limit message. Hypothesis: limits also apply per public IP, and the company network shares one. Test from another network. If confirmed, the input for this project needs another collection setup.
-- *Open:* does Glue 6.0 keep Spark's ANSI mode default?
-- *Open:* Glue 6.0 availability and price in `eu-north-1` are confirmed when the job is created.
+- *Resolved:* a custom IAM role works in the new AWS experience; the Glue console selects it through "Customize" (default: automatically generated permissions).
+- *Resolved:* Glue 6.0 is available in `eu-north-1`; ANSI mode is set explicitly in the job.
+- *Resolved:* the Alpha Vantage rejections came from the company network (the proxy forwards the internal client IP); catch-up runs at 11:00 and 13:30 keep the daily collection complete. Moving the collection to the cloud is part of project 6.
 - *Accepted:* non-atomic overwrite (section 5).
-- *Accepted:* the scheduled collection depends on the laptop being on.
+- *Accepted:* the scheduled collection depends on the laptop being on (until project 6).
+- *Deferred:* Databricks stage, to project 9 (section 4.10).
 - *Follow-up:* mask the API key in collector logs.
+- *Follow-up:* confirm the Glue 6.0 DPU-hour rate for `eu-north-1` on the pricing page.
 
 ## 11. Implementation Plan
 
-1. Branch `serverless-etl`; local Spark environment (Python 3.13, PySpark 4.1, JDK 17).
-2. Pure functions and their tests: parse, deduplicate, validate.
-3. AWS resources: Glue role (first), assets bucket, `iam:PassRole`, Athena workgroup.
-4. Job script `main()`, upload, first Glue run, fixes.
-5. Athena DDL, business queries, measurement.
-6. Databricks stage.
+1. ✔ Branch `serverless-etl`; local Spark environment (WSL2, Python 3.13, PySpark 4.1.1, JDK 17).
+2. ✔ The job functions and their tests (20 tests).
+3. ✔ AWS resources: Glue role, assets bucket with a 7-day lifecycle rule on `temp/`, Athena workgroup.
+4. ✔ First Glue run: succeeded in 2 min 15 s, 0.075 DPU-hours; 71 raw files, 577 rows.
+5. ✔ Athena DDL, business queries (Q1-Q6), measurement (section 8.1).
+6. Deferred: Databricks stage (section 4.10).
 7. Documentation (this doc, README, project 2 doc update), merge, tag `v0.4-serverless-etl`.
 
 ## 12. Changes to Earlier Projects
 
 - **Project 2, collector exit code (2026-10-28):** `collect()` returns whether fresh data was written; `main()` exits with 1 when nothing was collected. Found when the first scheduled run reported success without new data. Replaces the project 2 decision "daily limit reached = planned stop, exit code 0".
 - **Project 2, scheduled collection (2026-10-28):** `scripts/run_daily_collection.ps1` and the Windows Task Scheduler task; details in [`p4-decision-log.md`](p4-decision-log.md).
+- **Project 2, collection wrapper (2026-10-29):** a ticker already collected today is skipped without an API call; catch-up runs at 11:00 and 13:30; the public IP of each run is logged. Root cause of the rejections: the company proxy forwards the internal client IP (decision log).
 - **Repository:** renamed on GitHub to `financial-data-platform` (2026-10-29).
 
 ## 13. Lessons Learned
 
-*To be written at the end of the project.*
+I found the task interesting and enjoyed every moment of working on it. It was valuable to experience the differences between the data layers, which the JSON vs Parquet measurement illustrated clearly. I gained the most insight into AWS, especially how and why the different services connect. This project broadened my perspective, and I can now envision taking on larger and more complex tasks. I believe this is just the beginning, and I look forward to deepening my understanding of data engineering.

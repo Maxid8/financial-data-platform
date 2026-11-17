@@ -46,6 +46,12 @@ changes to earlier projects go into their own design docs.
 - Business questions in `sql/athena_queries.sql` (Q1-Q6: latest daily return, 20-day moving average, annualised volatility, maximum drawdown, monthly return, unusual volume). Checked for logic on synthetic data in DuckDB; named WINDOW clauses avoided for Athena compatibility.
 
 - Measurement raw JSON vs Parquet done with a temporary Athena table over `raw/` (OpenX JSON SerDe, maps for the keys with spaces and dots, `MSCK REPAIR TABLE` for the partitions); results in the design doc, section 8.1. The deduplicated raw query matched the Parquet result exactly.
+### D10 update: Databricks stage deferred (2026-11-16)
+
+- Storage credential `daily_prices_raw_read` (IAM role `DatabricksRawReadRole`, read-only policy on `raw/`, trust policy with the Unity Catalog master role, self-assume and the real external ID) failed validation at "Assume Role" (`PERMISSION_DENIED`). Settings were rechecked and correct. Matches community reports for Free Edition with AWS accounts of the new AWS experience; likely an AWS-managed account policy, not proven.
+- Decision: the Databricks stage is deferred to project 9; this was an experiment, not a deliverable of project 4. The fallback (read-only IAM user key in a secret scope, boto3 copy to a Volume) was rejected: long-lived key, workaround code, schedule.
+- Clean-up: the Databricks credential, `DatabricksRawReadRole` and `DatabricksRawReadPolicy` are deleted.
+
 ## Detailed design of the job functions (2026-10-30)
 
 | Function | Input | Output | Notes |
