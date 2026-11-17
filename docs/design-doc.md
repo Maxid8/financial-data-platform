@@ -92,7 +92,7 @@ Load strategy: **upsert**, not delete-then-insert. The latter would cause race c
 - Structured logging via Python's `logging` module (not `print`): timestamp, level, context. This is a human-readable, event-level log — it does not replace, and is not replaced by, the `api_calls` table, which the application logic actually relies on.
 - Explicit separation of error types:
   - network error → retry, with exponential backoff
-  - rate limit reached → planned stop, not an immediate retry
+  - rate limit reached → planned stop, not an immediate retry; since project 4 the script then exits with code 1, so a scheduler does not count a run without fresh data as a success (see `serverless-etl-design.md`, section 12)
   - data format error → not retryable, requires human intervention, logged with emphasis
 - **Testing during development:** a single, previously saved API response is stored as a JSON file (e.g. under `tests/fixtures/`), so the parsing and upsert logic can be tested without network access or API quota. This is the JSON file's only role in this project — the call counter and log live exclusively in the `api_calls` table; there is no second, parallel state store.
 

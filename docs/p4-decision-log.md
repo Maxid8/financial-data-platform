@@ -19,7 +19,52 @@ changes to earlier projects go into their own design docs.
 | D9 | Deployment and runs | Job created in the console, settings documented: Glue 6.0, G.1X x 2, timeout 10 min (default would be 480 min), max concurrency 1, retries 0, bookmarks off, Flex execution, parameters `--raw_path` and `--processed_path`. Script upload and job start with the AWS CLI (`aws s3 cp`, `aws glue start-job-run`) using `aws login` and `AWS_CA_BUNDLE`. One script file; `awsglue` imported only in `main()`. |
 | D10 | Databricks | Databricks branch as the last stage of project 4, after the Glue part works: Unity Catalog external location (manual setup, read-only, `raw/` prefix), same pure functions, Delta output, Glue vs Databricks comparison in the README. Fallback: upload to a Volume. DataFrame API only (serverless Databricks runs on Spark Connect). |
 | D11 | Input data | 5 tickers (IBM, MSFT, AAPL, JPM, XOM), weekdays 9:00 from the Windows Task Scheduler through `scripts/run_daily_collection.ps1` (collector + verifier per ticker, log file in `logs/`, exit code 0/1). |
-| D12 | Repository | Same repository and folder; project 4 is closed with a `v0.4-...` tag. Open: rename the GitHub repository or keep the name. |
+| D12 | Repository | Same repository and local folder; project 4 is closed with a `v0.4-...` tag. GitHub repository renamed to `financial-data-platform` (the repository grows into the financial data platform of project 9; GitHub redirects the old URL). README title, intro and clone URL are updated when project 4 is closed. |
+
+### D8 update: local Spark runs in WSL2 (2026-11-03)
+
+- Native Windows failed twice: PySpark's `.cmd` launchers split the project path at its spaces, and with the virtual environment moved to a path without spaces the Python workers still crashed (`OSError: [WinError 10038]`, `Python worker exited unexpectedly`) with Python 3.13 and PySpark 4.1.1.
+- Options considered: Glue 5.1 with Python 3.11 + PySpark 3.5.6 on Windows; WSL2; developing in Glue. Chosen: **WSL2** (Ubuntu 24.04, OpenJDK 17, Python 3.13 from the deadsnakes PPA, virtual environment in `~/.venvs/spark`), so the local versions keep matching Glue 6.0.
+- The company proxy inspects TLS for some hosts only (pypi.org was not inspected, launchpad.net was): the two company CA certificates were added to the Ubuntu store (`update-ca-certificates`), and pip uses the system bundle (`pip config set global.cert /etc/ssl/certs/ca-certificates.crt`).
+- Git: write operations (add, commit, push) stay on Windows; WSL git is used read-only (`safe.directory` for this path; `core.filemode` is already false in the repository).
+- Tests: `pytest tests/test_raw_to_processed.py` in WSL (20 tests). The module skips itself in the collector environment (`importorskip`).
+
+### First Glue run (2026-11-16)
+
+- Job `daily-prices-raw-to-processed` created in the console with the D9 settings. Glue 6.0 is available in `eu-north-1`.
+- **Flex execution is not offered** by the console for Glue 6.0, so the job runs with the Standard execution class (D9 deviation; cost difference is cents per run).
+- **IAM role:** in the new AWS experience the console attaches automatically generated permissions by default ("Your Glue ETL job will automatically be given permission to access other services"). The "Customize" link allows selecting our own role; `DailyPricesGlueJobRole` is used, so the least-privilege policy of D7 applies. This closes the open question of D7: a custom role can be created and used.
+- Settings kept from the console defaults: continuous logging, job metrics, observability metrics, job insights. Spark UI and "Glue Data Catalog as Hive metastore" are off.
+- First run started; a second start was refused with `ConcurrentRunsExceededException` while it was still running: max concurrency 1 works as designed. Result of the first run: Succeeded in 2 min 15 s (Standard, G.1X x 2).
+- First run output: 71 raw files read, 577 rows written, 5 tickers, trading days 2026-05-19 to 2026-11-13; one Snappy-compressed Parquet file in `processed/daily_prices/` (no `_SUCCESS` marker is written in Glue). 0.075 DPU-hours, roughly 2-3 US cents at the Glue 6.0 rate (eu-north-1 rate to be confirmed on the pricing page).
+- The log contains a `SyntaxWarning: invalid escape sequence` from `/tmp/glue-job-.../pythonrunner/runscript.py`. This is Glue's own runner script under Python 3.13, not our code; it does not affect the job.
+
+### Athena (2026-11-16)
+
+- `financial_data` database and `daily_prices` external table created with `sql/athena_ddl.sql` in the `daily-prices` workgroup (managed results, 100 MB per-query limit).
+- Check query (row count and date range per ticker): input rows 577, the same as the Glue log; input bytes 6.66 KB for 577 rows, because Parquet only reads the columns the query uses (`ticker`, `trade_date`). Runtime 689 ms. Billed at the 10 MB minimum per query.
+- Business questions in `sql/athena_queries.sql` (Q1-Q6: latest daily return, 20-day moving average, annualised volatility, maximum drawdown, monthly return, unusual volume). Checked for logic on synthetic data in DuckDB; named WINDOW clauses avoided for Athena compatibility.
+
+- Measurement raw JSON vs Parquet done with a temporary Athena table over `raw/` (OpenX JSON SerDe, maps for the keys with spaces and dots, `MSCK REPAIR TABLE` for the partitions); results in the design doc, section 8.1. The deduplicated raw query matched the Parquet result exactly.
+### D10 update: Databricks stage deferred (2026-11-16)
+
+- Storage credential `daily_prices_raw_read` (IAM role `DatabricksRawReadRole`, read-only policy on `raw/`, trust policy with the Unity Catalog master role, self-assume and the real external ID) failed validation at "Assume Role" (`PERMISSION_DENIED`). Settings were rechecked and correct. Matches community reports for Free Edition with AWS accounts of the new AWS experience; likely an AWS-managed account policy, not proven.
+- Decision: the Databricks stage is deferred to project 9; this was an experiment, not a deliverable of project 4. The fallback (read-only IAM user key in a secret scope, boto3 copy to a Volume) was rejected: long-lived key, workaround code, schedule.
+- Clean-up: the Databricks credential, `DatabricksRawReadRole` and `DatabricksRawReadPolicy` are deleted.
+
+## Detailed design of the job functions (2026-10-30)
+
+| Function | Input | Output | Notes |
+|---|---|---|---|
+| `read_raw(spark, path)` | Spark session, `raw/` root | DataFrame, one row per file | explicit schema: `Meta Data.2. Symbol` and the `Time Series (Daily)` map (date string -> struct of five strings); other fields are not read. `year`, `month`, `day` come from partition discovery. |
+| `parse_snapshots(df)` | output of `read_raw` | DataFrame, one row per ticker, trading day and snapshot | explode the map; `ticker` from `Meta Data` (not the file name); `trade_date` from the map key (string to date); prices to DECIMAL(12,4), volume to BIGINT; `snapshot_date` from `year`/`month`/`day`; select the D1 columns. Keeps duplicates. |
+| `deduplicate(df)` | output of `parse_snapshots` | DataFrame, one row per ticker and trading day | `ROW_NUMBER` over `(ticker, trade_date)` ordered by `snapshot_date` desc (D3). |
+| rule helpers | DataFrame | DataFrame of violating rows (empty = passed) | one helper per D6 rule; the uniqueness rule returns the duplicated keys. |
+| `validate(df)` | output of `deduplicate` | nothing, or raises | empty input checked first; the NULL rule next and fails immediately (NULLs make comparisons unknown, so later rules would miss rows); all other rules run and their failures are collected into one exception: rule name, row count, examples (ticker, trade_date). |
+| `write_processed(df, path)` | DataFrame, `processed/daily_prices/` | nothing | `coalesce(1)`, overwrite, Parquet. |
+
+- `Meta Data.5. Time Zone` is `US/Eastern`: `trade_date` is the New York exchange date. Documented, not stored as a column.
+- The explicit schema also acts as a filter: unlisted fields are ignored; listed but missing fields become NULL and are caught by `validate`.
 
 ## Databricks spike (2026-10-28)
 
@@ -45,8 +90,25 @@ Conclusion: the forum claim that Free Edition cannot read S3 is about key-based 
 - `scripts/run_daily_collection.ps1` runs collector + verifier for each ticker; `logs/` added to `.gitignore`.
 - Success needs both exit codes to be 0. The verifier alone cannot tell a fresh object from one uploaded earlier the same day.
 
+### Collection wrapper: catch-up runs and IP logging (2026-10-29)
+
+- **Finding:** our `api_calls` table shows 10 calls on 2026-10-28 (5 successful) and 5 on 2026-10-29 (0 successful). Alpha Vantage refused calls with its "25 requests per day" message far below 25 calls from us. The same task succeeded at 15:41 the same day, and a browser call from the company network worked. The scheduler and the code are not the cause; the rejection is intermittent and decided by Alpha Vantage.
+- **Hypothesis (unconfirmed):** Alpha Vantage also limits per public IP, and the company network shares its IP(s). Users of shared hosting report the same pattern; their provider attributed it to IP-based limits. Alpha Vantage does not document this.
+- **Change:** the wrapper first checks with the verifier whether today's object exists and skips the ticker without an API call if it does. Repeated runs on the same day only retry missing tickers. Additional triggers at 11:00 and 13:30, before the New York open, so catch-up runs still return closed days.
+- **Diagnostics:** each run logs its public IP (checkip.amazonaws.com, same route as the collector), so rejections can be matched to IP addresses.
+
+### Root cause of the Alpha Vantage rejections (2026-10-30)
+
+- **Evidence:** all scheduled runs on 2026-10-30 (9:00, 11:00) were rejected. The IP lookup in the wrapper returned the laptop's internal address (172.16.x.x), and `httpbin.org/ip` showed two addresses: the internal one and the company's public IP. The company proxy therefore forwards the internal client IP (`X-Forwarded-For`). In the same minute, an Alpha Vantage call from the laptop browser was rejected and the same call from a phone on mobile data returned data.
+- **Conclusion:** the rejections are bound to the company network, not to the API key or our code. Most likely mechanism (not confirmed by Alpha Vantage): the provider counts requests per forwarded client IP, and a private address such as 172.16.x.x is shared by many networks worldwide; or it counts per public IP shared within the company. Either way the fix is outside the code.
+- **Options:** (1) the proxy stops forwarding internal IPs to external sites (also a privacy best practice); (2) run the collection from another network; (3) another data source.
+- **Impact on project 4:** none for development. The raw layer already has two complete snapshots for all five tickers (2026-10-28, 2026-10-29) plus earlier IBM snapshots, enough for parsing, deduplication and the partial-day test.
+
 ## Observations to follow up
 
 - **API key in the log file.** The Alpha Vantage error message contains the API key and is logged. `logs/` is git-ignored. Consider masking it in the collector.
 - **Rate limits.** Alpha Vantage free tier: 25 requests per day and 5 per minute (third-party source, macroption.com). The script pauses 15 s between tickers. Our own counter (UTC day, `api_calls` table) said there was quota left when Alpha Vantage refused; the provider's day boundary or counting may differ.
 - **Partial day captured.** The run on 2026-10-28 at 15:12 (Budapest) was during US trading hours, so that snapshot holds a partial 2026-10-28 bar. The next morning run has the final values: a real test case for D3.
+- **Scheduler did not start on 2026-10-29.** The condition "start only if the computer is on AC power" was still enabled and the laptop ran on battery at 9:00. The "run as soon as possible after a missed start" setting does not help here, because the start was not missed but blocked by a condition. Fix: condition disabled.
+- **Alpha Vantage refused the first call of 2026-10-29** (manual run at 12:11) with the daily-limit message, although only about 10 calls were made the day before. The fixed exit code worked: all five tickers were reported as FAILED. Hypothesis, not confirmed: the limit is also counted per public IP, and the company network shares one IP. Test: one collector run from another network.
+- **Correction (2026-10-30): no partial day.** The fixture check showed that the 2026-10-28 snapshot (collected 15:12 Budapest, during US trading hours) ends with 2026-10-27, and the 2026-10-29 snapshot ends with 2026-10-28. The free `TIME_SERIES_DAILY` response contains completed trading days only. The two snapshots overlap on 99 days with identical values. The "latest snapshot wins" rule (D3) stays: it handles provider corrections and is deterministic. The "partial day captured" note above was wrong.
